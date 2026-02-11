@@ -1,0 +1,16 @@
+name = "ISOAP"
+uuid = "75e88e8e-8488-4b14-bf8c-a5e98e21fac3"
+authors = ["Fastaxx <l.libat2001@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
+
+[compat]
+Printf = "1.11.0"
