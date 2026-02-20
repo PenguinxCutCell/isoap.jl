@@ -16,7 +16,7 @@ module ISOAP
 export Polyhedron, IsoResult, Grid
 
 # Core algorithm
-export isoap, isopol
+export IsoapWorkspace, isoap, isoap!, isopol, isopol!
 
 # Geometries
 export cube, tetrahedron, dodecahedron, icosahedron, complexcell

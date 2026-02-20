@@ -1,251 +1,329 @@
 """
-    isoap(poly::Polyhedron, phi::AbstractVector{Float64}, phiiso::Float64) -> IsoResult
+    IsoapWorkspace(poly::Polyhedron)
 
-Extract an isosurface from a general polyhedron.
-
-# Arguments
-- `poly`: the polyhedron
-- `phi`: scalar values at each vertex of the polyhedron (length == nvertices(poly))
-- `phiiso`: the iso-value
-
-# Returns
-An `IsoResult` containing the iso-polygons, iso-vertex coordinates, and the
-face indices over which each iso-edge is constructed.
+Reusable scratch buffers for allocation-free `isopol!` and `isoap!`.
+The workspace size is tied to the provided polyhedron topology.
 """
-function isoap(poly::Polyhedron, phi::AbstractVector{<:Real}, phiiso::Real)
+mutable struct IsoapWorkspace
+    ntp::Int
+    nts::Int
+    max_face_vertices::Int
+    max_edges::Int
+    ia::Vector{Int}
+    nedge::Vector{Int}
+    iscut::Vector{Int}
+    edge_map::Matrix{Int}
+    face_iso::Matrix{Int}
+    face_iso_count::Vector{Int}
+    ivise::Matrix{Int}
+    ipise::Matrix{Int}
+    ipia0::Vector{Int}
+    ipia1::Vector{Int}
+    ipmark::Vector{Int}
+    isoeface::Vector{Int}
+    vertiso::Vector{NTuple{3,Float64}}
+    polys::Matrix{Int}
+    poly_lens::Vector{Int}
+    nipnew::Int
+    npoly::Int
+end
+
+function IsoapWorkspace(poly::Polyhedron)
+    ntp = nvertices(poly)
+    nts = nfaces(poly)
+    max_face_vertices = maximum(length(face) for face in poly.ipv)
+    max_edges = sum(length(face) for face in poly.ipv)
+    return IsoapWorkspace(
+        ntp,
+        nts,
+        max_face_vertices,
+        max_edges,
+        fill(-1, ntp),
+        zeros(Int, nts),
+        zeros(Int, nts),
+        zeros(Int, ntp, ntp),
+        zeros(Int, nts, max_face_vertices),
+        zeros(Int, nts),
+        zeros(Int, nts, max_edges),
+        zeros(Int, max_edges, 2),
+        zeros(Int, max_edges),
+        zeros(Int, max_edges),
+        zeros(Int, max_edges),
+        zeros(Int, max_edges),
+        fill((0.0, 0.0, 0.0), max_edges),
+        zeros(Int, max_edges, max_edges),
+        zeros(Int, max_edges),
+        0,
+        0,
+    )
+end
+
+"""
+    isopol!(ws, ia, ipv, nts) -> nothing
+
+Allocation-free isopol arrangement using a preallocated workspace.
+Results are stored in `ws`:
+- `ws.npoly`, `ws.poly_lens`, `ws.polys`
+- `ws.nipnew`, `ws.ipia0`, `ws.ipia1`, `ws.isoeface`
+"""
+function isopol!(ws::IsoapWorkspace, ia::Vector{Int}, ipv::Vector{Vector{Int}}, nts::Int)
+    fill!(ws.nedge, 0)
+    fill!(ws.iscut, 0)
+    fill!(ws.edge_map, 0)
+    fill!(ws.face_iso_count, 0)
+    fill!(ws.ivise, 0)
+    fill!(ws.ipise, 0)
+
+    niscut = 0
+    for is in 1:nts
+        nipv_is = length(ipv[is])
+        if nipv_is == 0
+            continue
+        end
+        nedge_is = 0
+        for iv in 1:nipv_is
+            ip = ipv[is][iv]
+            iv1 = iv == nipv_is ? 1 : iv + 1
+            ip1 = ipv[is][iv1]
+            if ia[ip] != ia[ip1]
+                nedge_is += 1
+            end
+        end
+        if nedge_is > 0
+            ws.iscut[is] = 1
+            ws.nedge[is] = nedge_is
+            niscut += 1
+        end
+    end
+
+    if niscut == 0
+        ws.nipnew = 0
+        ws.npoly = 0
+        return nothing
+    end
+
+    nipnew = 0
+    for is in 1:nts
+        if ws.iscut[is] == 0
+            continue
+        end
+        nint = 0
+        nipv_is = length(ipv[is])
+        for iv in 1:nipv_is
+            ip = ipv[is][iv]
+            iv1 = iv == nipv_is ? 1 : iv + 1
+            ip1_edge = ipv[is][iv1]
+            if ia[ip] == ia[ip1_edge]
+                continue
+            end
+
+            nint += 1
+            if ia[ip] == 1
+                ip1i = ip
+                ip0i = ip1_edge
+                itype = 2
+            else
+                ip1i = ip1_edge
+                ip0i = ip
+                itype = 1
+            end
+
+            ipnew = ws.edge_map[ip0i, ip1i]
+            if ipnew == 0
+                nipnew += 1
+                ipnew = nipnew
+                ws.edge_map[ip0i, ip1i] = ipnew
+                ws.ipia0[ipnew] = ip0i
+                ws.ipia1[ipnew] = ip1i
+            end
+
+            ws.face_iso[is, nint] = ipnew
+            ws.ivise[is, ipnew] = nint
+            ws.ipise[ipnew, itype] = is
+        end
+        ws.face_iso_count[is] = nint
+    end
+
+    fill!(ws.ipmark, 0)
+    fill!(ws.poly_lens, 0)
+    fill!(ws.isoeface, 0)
+
+    npoly = 0
+    ivnewt = 0
+    for ipnew_start in 1:nipnew
+        if ws.ipmark[ipnew_start] != 0
+            continue
+        end
+
+        npoly += 1
+        ipini = ipnew_start
+        ipnew = ipnew_start
+        len = 1
+
+        ws.polys[npoly, len] = ipnew
+        ws.isoeface[ipnew] = ws.ipise[ipnew, 1]
+        ws.ipmark[ipnew] = 1
+        ivnewt += 1
+
+        while true
+            is = ws.ipise[ipnew, 1]
+            iv = ws.ivise[is, ipnew]
+            iv1 = iv - 1
+            if iv1 == 0
+                iv1 = ws.face_iso_count[is]
+            end
+            ipnew = ws.face_iso[is, iv1]
+
+            if ipnew == ipini
+                break
+            end
+
+            len += 1
+            ws.polys[npoly, len] = ipnew
+            ws.isoeface[ipnew] = ws.ipise[ipnew, 1]
+            ws.ipmark[ipnew] = 1
+            ivnewt += 1
+            if ivnewt == nipnew
+                break
+            end
+        end
+
+        ws.poly_lens[npoly] = len
+    end
+
+    ws.nipnew = nipnew
+    ws.npoly = npoly
+    return nothing
+end
+
+"""
+    isoap!(ws, poly, phi, phiiso) -> nothing
+
+Allocation-free isosurface extraction. Results are written into `ws`.
+"""
+function isoap!(ws::IsoapWorkspace, poly::Polyhedron, phi::AbstractVector{<:Real}, phiiso::Real)
     ntp = nvertices(poly)
     nts = nfaces(poly)
 
-    # Tag vertices: 1 if phi > phiiso, 0 otherwise
-    ia = fill(-1, ntp)
     icontp = 0
     icontn = 0
+    fill!(ws.ia, -1)
 
     for is in 1:nts
         for ip in poly.ipv[is]
-            if ia[ip] == -1
+            if ws.ia[ip] == -1
                 if phi[ip] > phiiso
-                    ia[ip] = 1
+                    ws.ia[ip] = 1
                     icontp += 1
                 else
-                    ia[ip] = 0
+                    ws.ia[ip] = 0
                     icontn += 1
                 end
             end
         end
     end
 
-    # If all vertices are on the same side, no isosurface
     if icontp == 0 || icontn == 0
+        ws.nipnew = 0
+        ws.npoly = 0
+        return nothing
+    end
+
+    isopol!(ws, ws.ia, poly.ipv, nts)
+    if ws.npoly == 0
+        return nothing
+    end
+
+    for ip in 1:ws.nipnew
+        ip0 = ws.ipia0[ip]
+        ip1 = ws.ipia1[ip]
+        t = (phiiso - phi[ip0]) / (phi[ip1] - phi[ip0])
+        x0, y0, z0 = poly.vertp[ip0]
+        x1, y1, z1 = poly.vertp[ip1]
+        ws.vertiso[ip] = (
+            x0 + t * (x1 - x0),
+            y0 + t * (y1 - y0),
+            z0 + t * (z1 - z0),
+        )
+    end
+
+    return nothing
+end
+
+"""
+    isoap(poly::Polyhedron, phi::AbstractVector{Float64}, phiiso::Float64) -> IsoResult
+
+Extract an isosurface from a general polyhedron.
+"""
+function isoap(poly::Polyhedron, phi::AbstractVector{<:Real}, phiiso::Real)
+    ws = IsoapWorkspace(poly)
+    isoap!(ws, poly, phi, phiiso)
+
+    if ws.npoly == 0
         return IsoResult(Vector{Int}[], Int[], NTuple{3,Float64}[])
     end
 
-    # Insert and arrange the iso-vertices
-    ipviso, isoeface_vec, ipia0, ipia1, nipnew = isopol(ia, poly.ipv, nts)
-
-    if isempty(ipviso)
-        return IsoResult(Vector{Int}[], Int[], NTuple{3,Float64}[])
-    end
-
-    # Compute iso-vertex coordinates by linear interpolation
-    vertiso = Vector{NTuple{3,Float64}}(undef, nipnew)
-    for iso_poly in ipviso
-        for ip in iso_poly
-            ip0 = ipia0[ip]
-            ip1 = ipia1[ip]
-            t = (phiiso - phi[ip0]) / (phi[ip1] - phi[ip0])
-            x0, y0, z0 = poly.vertp[ip0]
-            x1, y1, z1 = poly.vertp[ip1]
-            vertiso[ip] = (
-                x0 + t * (x1 - x0),
-                y0 + t * (y1 - y0),
-                z0 + t * (z1 - z0)
-            )
+    ipviso = Vector{Vector{Int}}(undef, ws.npoly)
+    for i in 1:ws.npoly
+        len = ws.poly_lens[i]
+        poly_i = Vector{Int}(undef, len)
+        for j in 1:len
+            poly_i[j] = ws.polys[i, j]
         end
+        ipviso[i] = poly_i
     end
 
-    return IsoResult(ipviso, isoeface_vec, vertiso)
+    isoeface = Vector{Int}(undef, ws.nipnew)
+    vertiso = Vector{NTuple{3,Float64}}(undef, ws.nipnew)
+    for i in 1:ws.nipnew
+        isoeface[i] = ws.isoeface[i]
+        vertiso[i] = ws.vertiso[i]
+    end
+
+    return IsoResult(ipviso, isoeface, vertiso)
 end
 
 """
     isopol(ia, ipv, nts) -> (ipviso, isoeface, ipia0, ipia1, nipnew)
 
 Insert and arrange iso-vertices on the faces of the polyhedron cut by the isosurface.
-
-Internal function used by `isoap`.
 """
 function isopol(ia::Vector{Int}, ipv::Vector{Vector{Int}}, nts::Int)
-    # Determine which faces are cut and count intersected edges per face
-    nedge = zeros(Int, nts)
-    iscut = zeros(Int, nts)
-    niscut = 0
-
-    for is in 1:nts
-        nipv_is = length(ipv[is])
-        if nipv_is > 0
-            for iv in 1:nipv_is
-                ip = ipv[is][iv]
-                iv1 = iv == nipv_is ? 1 : iv + 1
-                ip1 = ipv[is][iv1]
-                if ia[ip] != ia[ip1]
-                    iscut[is] = 1
-                    nedge[is] += 1
-                end
-            end
-            if iscut[is] == 1
-                niscut += 1
+    ntp = 0
+    for face in ipv
+        for ip in face
+            if ip > ntp
+                ntp = ip
             end
         end
     end
 
-    if niscut == 0
+    poly_dummy = Polyhedron(ipv, fill((0.0, 0.0, 0.0), ntp))
+    ws = IsoapWorkspace(poly_dummy)
+    isopol!(ws, ia, ipv, nts)
+
+    if ws.npoly == 0
         return (Vector{Int}[], Int[], Int[], Int[], 0)
     end
 
-    # Iso-vertex insertion
-    # For each cut face, find intersection points on edges and record them
-    nipnew = 0
-    ipia0 = Dict{Int,Int}()  # iso-vertex -> polyhedron vertex with ia=0
-    ipia1 = Dict{Int,Int}()  # iso-vertex -> polyhedron vertex with ia=1
-    
-    # ISE[is][edge_count] = iso-vertex index for the edge_count-th cut edge of face is
-    ise = Dict{Int,Vector{Int}}()
-    # IPVINT[is] = list of iso-vertices for face is (in face-traversal order)
-    ipvint = Dict{Int,Vector{Int}}()
-    # IVISE[is][ipnew] = position within ipvint[is] of iso-vertex ipnew
-    ivise = Dict{Int,Dict{Int,Int}}()
-    # IPISE[ipnew] = (face_for_type1, face_for_type2) 
-    # type 1: edge goes from ia=0 to ia=1, type 2: edge goes from ia=1 to ia=0
-    ipise = Dict{Int,Vector{Int}}()
-
-    for is in 1:nts
-        if iscut[is] == 1
-            niv = 0
-            nint = 0
-            ise[is] = Int[]
-            ipvint[is] = Int[]
-            ivise[is] = Dict{Int,Int}()
-
-            nipv_is = length(ipv[is])
-            for iv in 1:nipv_is
-                ip = ipv[is][iv]
-                iv1 = iv == nipv_is ? 1 : iv + 1
-                ip1_edge = ipv[is][iv1]
-
-                if ia[ip] != ia[ip1_edge]
-                    nint += 1
-                    niv += 1
-                    if ia[ip] == 1
-                        ip1i = ip
-                        ip0i = ip1_edge
-                        itype = 2
-                    else
-                        ip1i = ip1_edge
-                        ip0i = ip
-                        itype = 1
-                    end
-
-                    # Check if this edge was already seen in a previous face
-                    found = false
-                    for is1 in 1:is-1
-                        if haskey(ise, is1)
-                            for ie in 1:length(ise[is1])
-                                ipnew_candidate = ise[is1][ie]
-                                ip0n = ipia0[ipnew_candidate]
-                                ip1n = ipia1[ipnew_candidate]
-                                if ip0n == ip0i && ip1n == ip1i
-                                    push!(ise[is], ipnew_candidate)
-                                    push!(ipvint[is], ipnew_candidate)
-                                    ivise[is][ipnew_candidate] = niv
-                                    if !haskey(ipise, ipnew_candidate)
-                                        ipise[ipnew_candidate] = [0, 0]
-                                    end
-                                    ipise[ipnew_candidate][itype] = is
-                                    found = true
-                                    break
-                                end
-                            end
-                            if found
-                                break
-                            end
-                        end
-                    end
-
-                    if !found
-                        nipnew += 1
-                        ipia0[nipnew] = ip0i
-                        ipia1[nipnew] = ip1i
-                        push!(ipvint[is], nipnew)
-                        push!(ise[is], nipnew)
-                        ivise[is][nipnew] = niv
-                        if !haskey(ipise, nipnew)
-                            ipise[nipnew] = [0, 0]
-                        end
-                        ipise[nipnew][itype] = is
-                    end
-                end
-            end
+    ipviso = Vector{Vector{Int}}(undef, ws.npoly)
+    for i in 1:ws.npoly
+        len = ws.poly_lens[i]
+        poly_i = Vector{Int}(undef, len)
+        for j in 1:len
+            poly_i[j] = ws.polys[i, j]
         end
+        ipviso[i] = poly_i
     end
 
-    # Iso-vertex arrangement: trace connected iso-polygons
-    ipmark = zeros(Int, nipnew)
-    ipviso_result = Vector{Vector{Int}}()
-    isoeface_result = zeros(Int, nipnew)
-
-    ivnewt = 0
-    # Start from the first unmarked iso-vertex
-    ipnew_start = 1
-    while ipnew_start <= nipnew
-        if ipmark[ipnew_start] != 0
-            ipnew_start += 1
-            continue
-        end
-
-        # Start a new iso-polygon
-        current_polygon = Int[]
-        ipini = ipnew_start
-        ipnew = ipnew_start
-
-        push!(current_polygon, ipnew)
-        isoeface_result[ipnew] = ipise[ipnew][1]
-        ipmark[ipnew] = 1
-        ivnewt += 1
-
-        while true
-            is = ipise[ipnew][1]
-            iv = ivise[is][ipnew]
-            iv1 = iv - 1
-            if iv1 == 0
-                iv1 = length(ipvint[is])
-            end
-            ipnew = ipvint[is][iv1]
-
-            if ipnew == ipini
-                break
-            end
-
-            push!(current_polygon, ipnew)
-            isoeface_result[ipnew] = ipise[ipnew][1]
-            ipmark[ipnew] = 1
-            ivnewt += 1
-
-            if ivnewt == nipnew
-                break
-            end
-        end
-
-        push!(ipviso_result, current_polygon)
-        ipnew_start += 1
+    isoeface = Vector{Int}(undef, ws.nipnew)
+    ipia0 = Vector{Int}(undef, ws.nipnew)
+    ipia1 = Vector{Int}(undef, ws.nipnew)
+    for i in 1:ws.nipnew
+        isoeface[i] = ws.isoeface[i]
+        ipia0[i] = ws.ipia0[i]
+        ipia1[i] = ws.ipia1[i]
     end
 
-    # Convert ipia0, ipia1 dicts to vectors
-    ipia0_vec = zeros(Int, nipnew)
-    ipia1_vec = zeros(Int, nipnew)
-    for i in 1:nipnew
-        ipia0_vec[i] = ipia0[i]
-        ipia1_vec[i] = ipia1[i]
-    end
-
-    return (ipviso_result, isoeface_result, ipia0_vec, ipia1_vec, nipnew)
+    return (ipviso, isoeface, ipia0, ipia1, ws.nipnew)
 end

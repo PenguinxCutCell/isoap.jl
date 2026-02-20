@@ -122,6 +122,55 @@ using Test
                 end
             end
         end
+
+        @testset "In-place API (isoap! / isopol!)" begin
+            function _ws_iso_result(ws::IsoapWorkspace)
+                ipviso = Vector{Vector{Int}}(undef, ws.npoly)
+                for i in 1:ws.npoly
+                    len = ws.poly_lens[i]
+                    ipviso[i] = [ws.polys[i, j] for j in 1:len]
+                end
+                isoeface = [ws.isoeface[i] for i in 1:ws.nipnew]
+                vertiso = [ws.vertiso[i] for i in 1:ws.nipnew]
+                return (ipviso, isoeface, vertiso)
+            end
+
+            for code in [1, 2, 3, 4, 5, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110]
+                p = get_cell_geometry(code)
+                phi = assign_phi(p, 1)
+                phiiso = 0.0
+
+                result = isoap(p, phi, phiiso)
+                ws = IsoapWorkspace(p)
+                isoap!(ws, p, phi, phiiso)
+
+                ipviso_ws, isoeface_ws, vertiso_ws = _ws_iso_result(ws)
+                @test ws.npoly == ISOAP.niso(result)
+                @test ws.nipnew == length(result.vertiso)
+                @test ipviso_ws == result.ipviso
+                @test isoeface_ws == result.isoeface
+                @test vertiso_ws == result.vertiso
+            end
+
+            let p = cube(),
+                phi = assign_phi(p, 1),
+                phiiso = 0.0,
+                ws = IsoapWorkspace(p)
+                run_isoap!() = (isoap!(ws, p, phi, phiiso); nothing)
+                run_isoap!() # warm-up
+                @test @allocated(run_isoap!()) == 0
+            end
+
+            let p = cube(),
+                phi = assign_phi(p, 1),
+                ia = [v > 0.0 ? 1 : 0 for v in phi],
+                ws = IsoapWorkspace(p),
+                nts = ISOAP.nfaces(p)
+                run_isopol!() = (isopol!(ws, ia, p.ipv, nts); nothing)
+                run_isopol!() # warm-up
+                @test @allocated(run_isopol!()) == 0
+            end
+        end
     end
 
     @testset "VTK output" begin
