@@ -1,5 +1,6 @@
 # isoap.jl
 
+[![In development documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://penguinxcutcell.github.io/isoap.jl/dev)
 ![CI](https://github.com/PenguinxCutCell/isoap.jl/workflows/CI/badge.svg)
 
 
