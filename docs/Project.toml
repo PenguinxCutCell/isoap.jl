@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+ISOAP = "75e88e8e-8488-4b14-bf8c-a5e98e21fac3"
+
+[compat]
+Documenter = "1"
