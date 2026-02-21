@@ -13,7 +13,6 @@ makedocs(
     ),
     pages = [
         "Home" => "index.md",
-        "Getting Started" => "getting-started.md",
         "Geometry Types" => "geometry-types.md",
         "Core Algorithms" => "core-algorithms.md",
         "Grid Handling" => "grid-handling.md",
